@@ -1,10 +1,13 @@
-torch==2.0.1
-torchvision==0.15.2
-facenet-pytorch==2.5.0
-opencv-python==4.8.1.78
-Pillow==10.0.1
-lpips==0.1.4
-numpy==1.24.3
-scikit-image==0.21.0
-tqdm==4.66.1
-matplotlib==3.7.2
+# PixelShield PoC Dependencies
+# Updated for Python 3.8+ compatibility
+
+torch>=2.0.0
+torchvision>=0.15.0
+facenet-pytorch>=2.5.0
+opencv-python>=4.8.0
+Pillow>=9.0.0
+lpips>=0.1.4
+numpy>=1.21.0
+scikit-image>=0.20.0
+tqdm>=4.66.0
+matplotlib>=3.7.0
