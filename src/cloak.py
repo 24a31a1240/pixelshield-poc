@@ -10,6 +10,16 @@ This script takes an input photo and generates a 'cloaked' version that:
 The mechanism: Projected Gradient Descent (PGD) iteratively adds small,
 invisible noise to the image to maximize the face-embedding distance while
 staying within perceptual and pixel-value bounds.
+
+CRITICAL BUGFIXES APPLIED (v2.0):
+- FIX #1: Separated get_embedding() (no_grad) from get_embedding_grad() (with gradients)
+  Problem: get_embedding() used inside PGD loop severed the autograd graph
+  Solution: Created separate get_embedding_grad() that keeps gradients flowing to delta
+  
+- FIX #2: Initialize delta with random noise instead of zeros (standard PGD practice)
+  Problem: L2 norm gradient at delta=0 is degenerate (0/0), gradient=0, optimizer never moves
+  Solution: Random-start PGD: initialize delta uniformly in [-epsilon, epsilon] ball
+  Reference: This is the standard fix used in all published PGD implementations
 """
 
 import argparse
@@ -40,6 +50,12 @@ class ImageCloaker:
     - alpha (α): Step size per PGD iteration (e.g., 2/255). Controls optimization speed.
     - num_steps: How many PGD iterations to run. More = stronger perturbation.
     - lpips_threshold: Maximum allowed perceptual distance. Prevents visible artifacts.
+    
+    CRITICAL FIXES (v2.0):
+    1. Separated embedding computation into two functions:
+       - get_embedding(): Used for original image, no gradients needed (faster)
+       - get_embedding_grad(): Used inside PGD loop, gradients flow through delta
+    2. Initialize delta with random noise instead of zeros (fixes degenerate gradient at origin)
     """
     
     def __init__(self, device='cpu'):
@@ -81,12 +97,29 @@ class ImageCloaker:
         return img_tensor.to(self.device), img
     
     def get_embedding(self, img_tensor):
-        """Extract face embedding from image tensor."""
+        """
+        Extract face embedding from image tensor WITHOUT gradient tracking.
+        Used for original image and final evaluation only.
+        """
         with torch.no_grad():
             # Normalize for FaceNet
             x = self.normalize(img_tensor)
             embedding = self.model(x)  # Returns [1, 512] embedding vector
         return embedding.detach()
+    
+    def get_embedding_grad(self, img_tensor):
+        """
+        Extract face embedding WITH gradient tracking.
+        Used inside PGD loop so gradients can flow to delta.
+        
+        FIX #1: Separate function allows gradients to flow during optimization
+        This is critical - using get_embedding() inside the loop would break
+        the autograd graph and cause: RuntimeError: element 0 of tensors does not require grad
+        """
+        # Normalize for FaceNet (gradients flow through this)
+        x = self.normalize(img_tensor)
+        embedding = self.model(x)  # Gradients flow here to delta
+        return embedding
     
     def compute_perturbation(self, original_img_tensor, epsilon=8/255, alpha=2/255,
                             num_steps=40, lpips_threshold=0.05):
@@ -108,17 +141,21 @@ class ImageCloaker:
         """
         print(f"\n[*] Starting PGD optimization (epsilon={epsilon:.4f}, steps={num_steps})...")
         
-        # Get original embedding
+        # Get original embedding (no gradients needed)
         orig_embedding = self.get_embedding(original_img_tensor)
         
-        # Initialize perturbation
-        delta = torch.zeros_like(original_img_tensor).to(self.device)
+        # Initialize perturbation with random noise (FIX #2)
+        # This is the standard "random start" technique used in ALL published PGD implementations
+        # It solves the critical problem: L2 norm gradient at delta=0 is mathematically degenerate
+        # At exactly zero: d/dx ||x||_2 = x / ||x||_2 = 0/0 (undefined, PyTorch returns 0)
+        # Random start ensures we begin with non-zero embeddings where gradients flow properly
+        delta = (torch.rand_like(original_img_tensor) - 0.5) * 2 * epsilon
+        delta = delta.to(self.device)
         delta.requires_grad = True
         
         optimizer = torch.optim.SGD([delta], lr=alpha)
         
         best_distance = 0.0
-        best_delta = delta.clone().detach()
         lpips_scores = []
         embedding_distances = []
         
@@ -128,15 +165,17 @@ class ImageCloaker:
             # Perturbed image (clipped to [0, 1])
             perturbed = torch.clamp(original_img_tensor + delta, 0, 1)
             
-            # Get embedding of perturbed image
-            perturbed_embedding = self.get_embedding(perturbed)
+            # Get embedding of perturbed image WITH gradients (uses FIX #1)
+            perturbed_embedding = self.get_embedding_grad(perturbed)
             
             # Loss: maximize L2 distance between embeddings
             # (We want to make the cloaked version as different as possible from original)
             embedding_distance = torch.norm(perturbed_embedding - orig_embedding, p=2)
             loss = -embedding_distance  # Negative because we're maximizing
             
-            # Backpropagation
+            # Backpropagation - now works because:
+            # 1. get_embedding_grad keeps gradients flowing (FIX #1)
+            # 2. delta started with non-zero random noise so gradient is well-defined (FIX #2)
             loss.backward()
             optimizer.step()
             
@@ -196,7 +235,7 @@ class ImageCloaker:
         Main entry point: load image, compute cloaking perturbation, save result.
         """
         print(f"\n{'='*70}")
-        print(f"PixelShield Adversarial Cloaking")
+        print(f"PixelShield Adversarial Cloaking (v2.0 - Bugfixes Applied)")
         print(f"{'='*70}")
         print(f"Input: {input_path}")
         print(f"Output: {output_path}")
